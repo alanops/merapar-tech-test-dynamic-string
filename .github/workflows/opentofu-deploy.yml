@@ -1,0 +1,63 @@
+# .github/workflows/opentofu-deploy.yml
+name: OpenTofu Deploy (simple)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy to
+        required: true
+        default: stage
+        type: choice
+        options: [stage, prod]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # If you have environment‑level protection rules, keep this:
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup OpenTofu
+      uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: 1.9.0
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: eu-west-1
+
+    - name: tofu init
+      run: tofu init -reconfigure
+
+    # (optional) import existing DynamoDB lock table if present
+    - name: Import lock table (if exists)
+      run: |
+        ENV_SUFFIX=${{ inputs.environment }}
+        if aws dynamodb describe-table --table-name "merapar-${ENV_SUFFIX}-terraform-locks" >/dev/null 2>&1; then
+          tofu import aws_dynamodb_table.terraform_locks "merapar-${ENV_SUFFIX}-terraform-locks" || true
+        fi
+
+    - name: tofu plan
+      run: |
+        tofu plan \
+          -var="environment=${{ inputs.environment }}" \
+          -out=tfplan
+
+    - name: Generate checksum
+      run: sha256sum tfplan > tfplan.sha256
+
+    - name: Show plan (human‑readable)
+      run: tofu show tfplan
+
+    # If your environment is protected you’ll get an approval gate here.
+    - name: tofu apply
+      run: |
+        sha256sum -c tfplan.sha256
+        tofu apply -auto-approve tfplan
