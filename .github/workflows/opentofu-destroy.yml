@@ -19,6 +19,9 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
 
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Required for OIDC to AWS
+      contents: read   # Required to checkout the repository
 
     # Hook into GitHub Environments so you get the approval gate
     environment:
@@ -30,17 +33,32 @@ jobs:
     - name: Setup OpenTofu
       uses: opentofu/setup-opentofu@v1
       with:
-        tofu_version: 1.9.0
+        tofu_version: 1.9.0 # Ensure this is a valid OpenTofu version
+
+    - name: Determine AWS Role ARN
+      id: aws_role
+      run: |
+        if [[ "${{ inputs.environment }}" == "stage" ]]; then
+          echo "role_arn=${{ secrets.AWS_ROLE_STAGE_ARN }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ inputs.environment }}" == "prod" ]]; then
+          echo "role_arn=${{ secrets.AWS_ROLE_PROD_ARN }}" >> $GITHUB_OUTPUT
+        else
+          echo "::error::Invalid environment: ${{ inputs.environment }}"
+          exit 1
+        fi
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        role-to-assume: ${{ steps.aws_role.outputs.role_arn }}
         aws-region: eu-west-1
 
     - name: tofu init
-      run: tofu init -reconfigure
+      run: |
+        tofu init -reconfigure \
+          -backend-config="bucket=merapar-terraform-state-${{ inputs.environment }}" \
+          -backend-config="key=dynamic-string/${{ inputs.environment }}/terraform.tfstate" \
+          -backend-config="dynamodb_table=merapar-terraform-locks-${{ inputs.environment }}"
 
     # Show a destroy plan first (great for the approval step)
     - name: tofu plan (destroy mode)
@@ -55,6 +73,7 @@ jobs:
     - name: tofu destroy
       run: |
         echo "About to destroy resources in environment: ${{ inputs.environment }}"
-        tofu destroy \
-          -auto-approve \
-          -var="environment=${{ inputs.environment }}"
+        # Applying the destroy plan ensures you destroy what was planned.
+        # If you prefer to re-calculate, use:
+        # tofu destroy -auto-approve -var="environment=${{ inputs.environment }}"
+        tofu apply -auto-approve tfplan-destroy

@@ -1,5 +1,6 @@
 locals {
-  name_prefix = "merapar-${var.environment}"
+  name_prefix      = "merapar-${var.environment}"
+  parameter_name_env = "/merapar/${var.environment}/dynamicString" # Environment-specific parameter name
 }
 
 provider "aws" {
@@ -15,13 +16,13 @@ provider "aws" {
 }
 
 resource "aws_kms_key" "ssm" {
-  description             = "KMS key for SSM parameter encryption"
+  description             = "KMS key for SSM parameter encryption for ${var.environment}"
   enable_key_rotation     = true
   deletion_window_in_days = 7
 }
 
 resource "aws_ssm_parameter" "dynamic" {
-  name        = var.parameter_name
+  name        = local.parameter_name_env # Use environment-specific name
   type        = "SecureString"
   value       = var.dynamic_string_initial
   overwrite   = true
@@ -55,7 +56,8 @@ resource "aws_iam_role_policy" "lambda_ssm" {
 data "aws_iam_policy_document" "lambda_ssm" {
   statement {
     actions   = ["ssm:GetParameter"]
-    resources = [aws_ssm_parameter.dynamic.arn]
+    # The aws_ssm_parameter.dynamic.arn will correctly reflect the new name
+    resources = [aws_ssm_parameter.dynamic.arn] 
   }
 
   statement {
@@ -80,7 +82,8 @@ resource "aws_lambda_function" "web" {
 
   environment {
     variables = {
-      STRING_PARAM_NAME = aws_ssm_parameter.dynamic.name
+      # Pass the environment-specific parameter name to the Lambda
+      STRING_PARAM_NAME = aws_ssm_parameter.dynamic.name 
     }
   }
 }
@@ -103,9 +106,9 @@ resource "aws_apigatewayv2_route" "any_root" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
-resource "aws_apigatewayv2_stage" "prod" {
+resource "aws_apigatewayv2_stage" "prod" { # Note: This stage name is static "$default"
   api_id      = aws_apigatewayv2_api.http.id
-  name        = "$default"
+  name        = "$default" # This is fine, as API Gateway stages are per-API.
   auto_deploy = true
 }
 

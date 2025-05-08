@@ -14,7 +14,9 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # If you have environment‑level protection rules, keep this:
+    permissions:
+      id-token: write # Required for OIDC to AWS
+      contents: read   # Required to checkout the repository
     environment:
       name: ${{ inputs.environment }}
 
@@ -24,25 +26,50 @@ jobs:
     - name: Setup OpenTofu
       uses: opentofu/setup-opentofu@v1
       with:
-        tofu_version: 1.9.0
+        tofu_version: 1.9.0 # Ensure this is a valid OpenTofu version
+
+    - name: Determine AWS Role ARN
+      id: aws_role
+      run: |
+        if [[ "${{ inputs.environment }}" == "stage" ]]; then
+          echo "role_arn=${{ secrets.AWS_ROLE_STAGE_ARN }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ inputs.environment }}" == "prod" ]]; then
+          echo "role_arn=${{ secrets.AWS_ROLE_PROD_ARN }}" >> $GITHUB_OUTPUT
+        else
+          echo "::error::Invalid environment: ${{ inputs.environment }}"
+          exit 1
+        fi
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        role-to-assume: ${{ steps.aws_role.outputs.role_arn }}
         aws-region: eu-west-1
 
     - name: tofu init
-      run: tofu init -reconfigure
+      run: |
+        tofu init -reconfigure \
+          -backend-config="bucket=merapar-terraform-state-${{ inputs.environment }}" \
+          -backend-config="key=dynamic-string/${{ inputs.environment }}/terraform.tfstate" \
+          -backend-config="dynamodb_table=merapar-terraform-locks-${{ inputs.environment }}"
 
     # (optional) import existing DynamoDB lock table if present
-    - name: Import lock table (if exists)
-      run: |
-        ENV_SUFFIX=${{ inputs.environment }}
-        if aws dynamodb describe-table --table-name "merapar-${ENV_SUFFIX}-terraform-locks" >/dev/null 2>&1; then
-          tofu import aws_dynamodb_table.terraform_locks "merapar-${ENV_SUFFIX}-terraform-locks" || true
-        fi
+    # This step might be unnecessary if backend is configured correctly from the start.
+    # Also, the resource name 'aws_dynamodb_table.terraform_locks' would need to match
+    # a resource defined in your main configuration if you were to manage it there.
+    # - name: Import lock table (if exists)
+    #   run: |
+    #     ENV_SUFFIX=${{ inputs.environment }}
+    #     TABLE_NAME="merapar-terraform-locks-${ENV_SUFFIX}"
+    #     # Check if the table exists
+    #     if aws dynamodb describe-table --table-name "${TABLE_NAME}" >/dev/null 2>&1; then
+    #       # Attempt to import. This assumes a resource named 'terraform_locks' exists in your .tf files.
+    #       # Adjust the local resource name if it's different (e.g., aws_dynamodb_table.locks)
+    #       echo "Attempting to import DynamoDB table ${TABLE_NAME} if not already in state."
+    #       # tofu import aws_dynamodb_table.terraform_locks "${TABLE_NAME}" || echo "Import failed or resource already in state."
+    #     else
+    #       echo "DynamoDB table ${TABLE_NAME} does not exist, skipping import."
+    #     fi
 
     - name: tofu plan
       run: |
